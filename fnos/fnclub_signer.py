@@ -86,10 +86,10 @@ class Config:
         
         # 必需的环境变量
         required_vars = {
-            'USERNAME': Config.USERNAME,
-            'PASSWORD': Config.PASSWORD,
-            'API_KEY': Config.API_KEY,
-            'SECRET_KEY': Config.SECRET_KEY
+            'FN_USERNAME': Config.USERNAME,
+            'FN_PASSWORD': Config.PASSWORD,
+            #'API_KEY': Config.API_KEY,
+            #'SECRET_KEY': Config.SECRET_KEY
         }
         
         for var_name, var_value in required_vars.items():
