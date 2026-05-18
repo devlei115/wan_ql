@@ -31,6 +31,10 @@ async function checkCookieValidity(cookie) {
             if (userNameMatch) {
                 return { valid: true, userName: userNameMatch[1].trim() };
             }
+            const nicknameMatch = html.match(/nickName["']\s*:\s*["']([^"']+)["']/);
+            if (nicknameMatch) {
+                return { valid: true, userName: nicknameMatch[1].trim() };
+            }
             return { valid: true, userName: '未知用户' };
         }
         
@@ -38,38 +42,6 @@ async function checkCookieValidity(cookie) {
     } catch (error) {
         console.error('检查Cookie有效性失败:', error.message);
         return { valid: false, userName: null };
-    }
-}
-
-async function getNewCookieViaApi() {
-    try {
-        console.log('尝试通过API获取新Cookie...');
-        
-        const response = await fetch('https://api.m.jd.com/client.action', {
-            method: 'POST',
-            headers: {
-                'User-Agent': 'jdapp;iPhone;9.5.0;14.2;network/4g;Mozilla/5.0 (iPhone; CPU iPhone OS 14_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148;supportJDSHWK/1',
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Accept': '*/*',
-                'Accept-Language': 'zh-CN,zh;q=0.9',
-                'Connection': 'keep-alive'
-            },
-            body: 'functionId=genToken&client=apple&clientVersion=9.5.0&uuid=12345678901234567890123456789012&openudid=12345678901234567890123456789012'
-        });
-        
-        const data = await response.json();
-        
-        if (data && data.data && data.data.token) {
-            const cookies = response.headers.get('set-cookie') || '';
-            if (cookies) {
-                return cookies.split(';').slice(0, 5).join('; ');
-            }
-        }
-        
-        return null;
-    } catch (error) {
-        console.error('通过API获取Cookie失败:', error.message);
-        return null;
     }
 }
 
@@ -141,17 +113,66 @@ function saveCookies(cookies) {
 }
 
 function getCookieFromEnv() {
-    const envCookie = process.env.JD_COOKIE;
-    if (!envCookie) return [];
+    const cookies = [];
     
-    const cookieList = envCookie.split('&');
-    return cookieList.filter(c => c.trim()).map((cookie, index) => ({
-        cookie: cookie.trim(),
-        remark: `账号${index + 1}`,
-        createdAt: new Date().toISOString(),
-        lastChecked: null,
-        status: 'unknown'
-    }));
+    const jdCookieEnv = process.env.JD_COOKIE;
+    if (jdCookieEnv) {
+        const cookieList = jdCookieEnv.split('&');
+        cookieList.filter(c => c.trim()).forEach((cookie, index) => {
+            cookies.push({
+                cookie: cookie.trim(),
+                remark: `账号${index + 1}`,
+                createdAt: new Date().toISOString(),
+                lastChecked: null,
+                status: 'unknown'
+            });
+        });
+    }
+    
+    let index = 1;
+    while (true) {
+        const envKey = `JD_COOKIE_${index}`;
+        const cookie = process.env[envKey];
+        if (!cookie) break;
+        
+        const existingIndex = cookies.findIndex(c => c.cookie === cookie.trim());
+        if (existingIndex === -1) {
+            cookies.push({
+                cookie: cookie.trim(),
+                remark: `账号${index}`,
+                createdAt: new Date().toISOString(),
+                lastChecked: null,
+                status: 'unknown'
+            });
+        }
+        index++;
+    }
+    
+    const jdCookiesEnv = process.env.JD_COOKIES;
+    if (jdCookiesEnv) {
+        try {
+            const cookieList = JSON.parse(jdCookiesEnv);
+            if (Array.isArray(cookieList)) {
+                cookieList.forEach((item, idx) => {
+                    const cookie = typeof item === 'string' ? item : item.cookie;
+                    const remark = typeof item === 'object' && item.remark ? item.remark : `账号${cookies.length + 1}`;
+                    if (cookie && cookies.findIndex(c => c.cookie === cookie.trim()) === -1) {
+                        cookies.push({
+                            cookie: cookie.trim(),
+                            remark: remark,
+                            createdAt: new Date().toISOString(),
+                            lastChecked: null,
+                            status: 'unknown'
+                        });
+                    }
+                });
+            }
+        } catch (e) {
+            console.error('解析JD_COOKIES JSON失败:', e.message);
+        }
+    }
+    
+    return cookies;
 }
 
 async function processAccount(account, index) {
@@ -184,26 +205,10 @@ async function processAccount(account, index) {
         return account;
     }
     
-    console.log('保活续期失败，尝试通过API获取新Cookie...');
-    const newCookie = await getNewCookieViaApi();
-    
-    if (newCookie) {
-        const newResult = await checkCookieValidity(newCookie);
-        if (newResult.valid) {
-            console.log('通过API获取新Cookie成功');
-            account.cookie = newCookie;
-            account.status = 'new';
-            account.userName = newResult.userName;
-            account.lastChecked = new Date().toISOString();
-            await sendNotify('京东Cookie获取成功', `账号 ${remark || '未命名'} 已获取新Cookie\n用户: ${newResult.userName}`);
-            return account;
-        }
-    }
-    
-    console.log('无法自动获取新Cookie，请手动登录');
+    console.log('保活续期失败，请手动重新登录获取新Cookie');
     account.status = 'expired';
     account.lastChecked = new Date().toISOString();
-    await sendNotify('京东Cookie失效', `账号 ${remark || '未命名'} Cookie已失效，无法自动续期，请手动重新登录获取新Cookie`);
+    await sendNotify('京东Cookie失效', `账号 ${remark || '未命名'} Cookie已失效，保活续期失败，请手动重新登录获取新Cookie`);
     
     return account;
 }
@@ -213,27 +218,40 @@ async function allTasks() {
     console.log(`执行时间: ${new Date().toLocaleString('zh-CN')}`);
     
     let cookies = loadCookies();
+    const envCookies = getCookieFromEnv();
+    
+    if (envCookies.length > 0) {
+        console.log(`从环境变量读取到 ${envCookies.length} 个Cookie`);
+        
+        const mergedCookies = [];
+        const existingCookieStrings = new Set(cookies.map(c => c.cookie));
+        
+        envCookies.forEach(envCookie => {
+            const existingIndex = cookies.findIndex(c => c.cookie === envCookie.cookie);
+            if (existingIndex !== -1) {
+                const existing = cookies[existingIndex];
+                mergedCookies.push({
+                    ...existing,
+                    remark: envCookie.remark || existing.remark,
+                    lastChecked: null
+                });
+            } else {
+                mergedCookies.push(envCookie);
+            }
+            existingCookieStrings.add(envCookie.cookie);
+        });
+        
+        cookies = mergedCookies;
+        saveCookies(cookies);
+    }
     
     if (cookies.length === 0) {
-        console.log('本地Cookie文件为空，尝试从环境变量读取...');
-        cookies = getCookieFromEnv();
-        
-        if (cookies.length === 0) {
-            console.log('未找到JD_COOKIE环境变量');
-            await sendNotify('京东Cookie检测', '错误：未配置JD_COOKIE环境变量且未找到本地Cookie文件');
-            return;
-        }
-        
-        saveCookies(cookies);
-        console.log('已从环境变量导入Cookie');
+        console.log('未找到JD_COOKIE环境变量且本地Cookie文件为空');
+        await sendNotify('京东Cookie检测', '错误：未配置JD_COOKIE环境变量');
+        return;
     }
     
-    const envCookies = getCookieFromEnv();
-    if (envCookies.length > 0 && envCookies.length !== cookies.length) {
-        console.log('检测到环境变量Cookie数量变化，更新本地Cookie...');
-        cookies = envCookies;
-        saveCookies(cookies);
-    }
+    console.log(`共检测 ${cookies.length} 个京东账号`);
     
     const updatedCookies = await Promise.all(
         cookies.map((account, index) => processAccount(account, index))
@@ -245,20 +263,32 @@ async function allTasks() {
         total: updatedCookies.length,
         valid: updatedCookies.filter(c => c.status === 'valid').length,
         refreshed: updatedCookies.filter(c => c.status === 'refreshed').length,
-        new: updatedCookies.filter(c => c.status === 'new').length,
         expired: updatedCookies.filter(c => c.status === 'expired').length
     };
     
     console.log(`\n========== 任务完成 ==========`);
     console.log(`总账号数: ${stats.total}`);
-    console.log(`有效: ${stats.valid} | 已续期: ${stats.refreshed} | 新获取: ${stats.new} | 失效: ${stats.expired}`);
+    console.log(`有效: ${stats.valid} | 已续期: ${stats.refreshed} | 失效: ${stats.expired}`);
     
     if (stats.expired > 0) {
+        const expiredAccounts = updatedCookies
+            .filter(c => c.status === 'expired')
+            .map(c => c.remark || '未命名账号')
+            .join('\n');
+        
         await sendNotify('京东Cookie检测报告', 
             `检测时间: ${new Date().toLocaleString('zh-CN')}\n` +
             `总账号: ${stats.total}\n` +
-            `有效: ${stats.valid} | 已续期: ${stats.refreshed} | 新获取: ${stats.new} | 失效: ${stats.expired}\n` +
-            `⚠️ ${stats.expired} 个账号Cookie失效，请手动重新登录`
+            `有效: ${stats.valid} | 已续期: ${stats.refreshed} | 失效: ${stats.expired}\n` +
+            `\n失效账号:\n${expiredAccounts}\n` +
+            `⚠️ 请手动重新登录获取新Cookie`
+        );
+    } else if (stats.refreshed > 0) {
+        await sendNotify('京东Cookie检测报告', 
+            `检测时间: ${new Date().toLocaleString('zh-CN')}\n` +
+            `总账号: ${stats.total}\n` +
+            `有效: ${stats.valid} | 已续期: ${stats.refreshed} | 失效: ${stats.expired}\n` +
+            `✅ 所有Cookie均正常`
         );
     }
     
